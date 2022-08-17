@@ -63,6 +63,7 @@ def query(tq, t, y, outside_value=0):
 
 def inner_outer(t0, t1, y1):
   """Construct inner and outer measures on (t1, y1) for t0."""
+  # t, t_env, w_env
   cy1 = jnp.concatenate([jnp.zeros_like(y1[..., :1]),
                          jnp.cumsum(y1, axis=-1)],
                         axis=-1)
@@ -79,6 +80,7 @@ def inner_outer(t0, t1, y1):
 
 def lossfun_outer(t, w, t_env, w_env, eps=jnp.finfo(jnp.float32).eps):
   """The proposal weight should be an upper envelope on the nerf weight."""
+  #t:sdist, w:weight, t_env, w_env:propose
   _, w_outer = inner_outer(t, t_env, w_env)
   # We assume w_inner <= w <= w_outer. We don't penalize w_inner because it's
   # more effective to pull w_outer up than it is to push w_inner down.
@@ -98,10 +100,18 @@ def pdf_to_weight(t, p):
 
 def max_dilate(t, w, dilation, domain=(-jnp.inf, jnp.inf)):
   """Dilate (via max-pooling) a non-negative step function."""
-  t0 = t[..., :-1] - dilation
+  t0 = t[..., :-1] - dilation #(1024, 1, 1, 64)
   t1 = t[..., 1:] + dilation
-  t_dilate = jnp.sort(jnp.concatenate([t, t0, t1], axis=-1), axis=-1)
+  t_dilate = jnp.sort(jnp.concatenate([t, t0, t1], axis=-1), axis=-1) #64+64+65=193
   t_dilate = jnp.clip(t_dilate, *domain)
+  # print('t_dilate----> ', t_dilate.shape)
+  # t_dilate - --->  (1024, 1, 1, 193)
+  # print(t0[..., None, :].shape)
+  # print(t_dilate[..., None].shape)
+  # print(w[..., None, :].shape)
+  # (1024, 1, 1, 1, 64)
+  # (1024, 1, 1, 193, 1)
+  # (1024, 1, 1, 1, 64)
   w_dilate = jnp.max(
       jnp.where(
           (t0[..., None, :] <= t_dilate[..., None])
@@ -110,6 +120,8 @@ def max_dilate(t, w, dilation, domain=(-jnp.inf, jnp.inf)):
           0,
       ),
       axis=-1)[..., :-1]
+  # print('w_dilate---> ', w_dilate.shape)
+  # w_dilate - -->  (1024, 1, 1, 192)
   return t_dilate, w_dilate
 
 
@@ -153,10 +165,17 @@ def integrate_weights(w):
 def invert_cdf(u, t, w_logits, use_gpu_resampling=False):
   """Invert the CDF defined by (t, w) at the points specified by u in [0, 1)."""
   # Compute the PDF and CDF for each weight vector.
+  # w_logits [B, 1, 1, 190]
+  # u: [B, 1, 1, num_samples]
   w = jax.nn.softmax(w_logits, axis=-1)
-  cw = integrate_weights(w)
+  cw = integrate_weights(w) #cdf
+  # print(t.shape, cw.shape)
+  # (1024, 1, 1, 191)(1024, 1, 1, 191)
+
   # Interpolate into the inverse CDF.
   interp_fn = math.interp if use_gpu_resampling else math.sorted_interp
+  # print('---> ', t.shape, cw.shape)
+  # (1024, 1, 1, 191)(1024, 1, 1, 191)
   t_new = interp_fn(u, cw, t)
   return t_new
 
@@ -204,10 +223,11 @@ def sample(rng,
     u_max = eps + (1 - eps) / num_samples
     max_jitter = (1 - u_max) / (num_samples - 1) - eps
     d = 1 if single_jitter else num_samples
+    # single_jitter: if true, disturb every ray with diff value, else with single value
     u = (
         jnp.linspace(0, 1 - u_max, num_samples) +
         jax.random.uniform(rng, t.shape[:-1] + (d,), maxval=max_jitter))
-
+  # u:[B, 1, 1, num_samples]
   return invert_cdf(u, t, w_logits, use_gpu_resampling=use_gpu_resampling)
 
 
@@ -260,6 +280,8 @@ def sample_intervals(rng,
   last = jnp.minimum(maxval, 2 * centers[..., -1:] - mid[..., -1:])
 
   t_samples = jnp.concatenate([first, mid, last], axis=-1)
+  # print(t_samples.shape)
+  # (1024, 1, 1, 65)
   return t_samples
 
 

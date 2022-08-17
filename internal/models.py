@@ -61,7 +61,7 @@ class Model(nn.Module):
   single_jitter: bool = True  # If True, jitter whole rays instead of samples.
   dilation_multiplier: float = 0.5  # How much to dilate intervals relatively.
   dilation_bias: float = 0.0025  # How much to dilate intervals absolutely.
-  num_glo_features: int = 0  # GLO vector length, disabled if 0.
+  num_glo_features: int = 0  # GLO(appearance encoding feature length) vector length, disabled if 0.
   num_glo_embeddings: int = 1000  # Upper bound on max number of train images.
   learned_exposure_scaling: bool = False  # Learned exposure scaling (RawNeRF).
   near_anneal_rate: Optional[float] = None  # How fast to anneal in near bound.
@@ -121,6 +121,8 @@ class Model(nn.Module):
           name='exposure_scaling_offsets')
 
     # Define the mapping from normalized to metric ray distance.
+    # for mipnerf360 raydist_fn = jax.numpy.reciprocal: 1/x
+    # ray.near:[B, 1, 1, 1]
     _, s_to_t = coord.construct_ray_warps(self.raydist_fn, rays.near, rays.far)
 
     # Initialize the range of (normalized) distances for each ray to [0, 1],
@@ -137,9 +139,8 @@ class Model(nn.Module):
     sdist = jnp.concatenate([
         jnp.full_like(rays.near, init_s_near),
         jnp.full_like(rays.far, init_s_far)
-    ],
-                            axis=-1)
-    weights = jnp.ones_like(rays.near)
+    ], axis=-1)  # [B, 1, 1, 2]
+    weights = jnp.ones_like(rays.near)  # [B, 1, 1, 1]
     prod_num_samples = 1
 
     ray_history = []
@@ -150,11 +151,14 @@ class Model(nn.Module):
 
       # Dilate by some multiple of the expected span of each current interval,
       # with some bias added in.
+
+      # eq20: epsilom = a/Multi(n_k) + b, dilation_multiplier=a, dilation_bias=b
+      # if s_far and s_near is 1 and 0, the same as paper
       dilation = self.dilation_bias + self.dilation_multiplier * (
           init_s_far - init_s_near) / prod_num_samples
 
       # Record the product of the number of samples seen so far.
-      prod_num_samples *= num_samples
+      prod_num_samples *= num_samples #Multi(n_k)
 
       # After the first level (where dilation would be a no-op) optionally
       # dilate the interval weights along each ray slightly so that they're
@@ -171,8 +175,9 @@ class Model(nn.Module):
         weights = weights[..., 1:-1]
 
       # Optionally anneal the weights as a function of training iteration.
-      if self.anneal_slope > 0:
+      if self.anneal_slope > 0: # eq18
         # Schlick's bias function, see https://arxiv.org/abs/2010.09714
+        # s==b , x==n/N in paper
         bias = lambda x, s: (s * x) / ((s - 1) * x + 1)
         anneal = bias(train_frac, self.anneal_slope)
       else:
@@ -180,12 +185,19 @@ class Model(nn.Module):
 
       # A slightly more stable way to compute weights**anneal. If the distance
       # between adjacent intervals is zero then its weight is fixed to 0.
+      # weight is ones in first layer, and shape is [B, 1, 1, 1]
       logits_resample = jnp.where(
           sdist[..., 1:] > sdist[..., :-1],
           anneal * jnp.log(weights + self.resample_padding), -jnp.inf)
+      # print(f'layer {i_level} logits_resample have bins {logits_resample.shape}')
+      # (1024, 1, 1, 190)
 
       # Draw sampled intervals from each ray's current weights.
       key, rng = random_split(rng)
+      # print(f'layer{i_level} have bins {sdist.shape}')
+      # layer 0 have bins(1024, 1, 1, 2)
+      # layer 1 have bins(1024, 1, 1, 191)
+      # layer 2 have bins(1024, 1, 1, 191)
       sdist = stepfun.sample_intervals(
           key,
           sdist,
@@ -204,6 +216,7 @@ class Model(nn.Module):
       tdist = s_to_t(sdist)
 
       # Cast our rays, by turning our distance intervals into Gaussians.
+      # the same as mipnerf IPE
       gaussians = render.cast_rays(
           tdist,
           rays.origins,

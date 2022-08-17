@@ -55,7 +55,11 @@ def track_linearize(fn, mean, cov):
   """
   if (len(mean.shape) + 1) != len(cov.shape):
     raise ValueError('cov must be non-diagonal')
+  # print('mean ---> ', mean.shape)
+  # mean - -->  (1024, 1, 1, 64, 3)
   fn_mean, lin_fn = jax.linearize(fn, mean)
+  # print('cov ---> ', cov.shape)
+  # cov - -->  (1024, 1, 1, 64, 3, 3)
   fn_cov = jax.vmap(lin_fn, -1, -2)(jax.vmap(lin_fn, -1, -2)(cov))
   return fn_mean, fn_cov
 

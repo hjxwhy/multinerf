@@ -119,6 +119,7 @@ def isdir(pth):
 
 def makedirs(pth):
   if not file_exists(pth):
+    print(pth)
     os.makedirs(pth)
 
 
