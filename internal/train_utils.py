@@ -256,6 +256,8 @@ def create_train_step(model: models.Model,
 
     def loss_fn(variables):
       rays = batch.rays
+      # print(rays.directions.shape)
+      # (1024, 1, 1, 3)
       if config.cast_rays_in_train_step:
         rays = camera_utils.cast_ray_batch(cameras, rays, camtype, xnp=jnp)
 

@@ -254,6 +254,7 @@ class Dataset(threading.Thread, metaclass=abc.ABCMeta):
     self.daemon = True  # Sets parent Thread to be a daemon.
     self._patch_size = np.maximum(config.patch_size, 1)
     self._batch_size = config.batch_size // jax.process_count()
+    print('jax.process_count()---> ', jax.process_count())
     if self._patch_size**2 > self._batch_size:
       raise ValueError(f'Patch size {self._patch_size}^2 too large for ' +
                        f'per-process batch size {self._batch_size}')
@@ -339,7 +340,10 @@ class Dataset(threading.Thread, metaclass=abc.ABCMeta):
     """
     x = self._queue.get()
     if self.split == utils.DataSplit.TRAIN:
-      return utils.shard(x)
+      x = utils.shard(x)
+      # shape  = jax.tree_util.tree_map(lambda x: [(jax.local_device_count(), -1) + x.shape[1:], x.shape], x)
+      # print(shape)
+      return x
     else:
       # Do NOT move test `rays` to device, since it may be very large.
       return x
@@ -595,7 +599,7 @@ class LLFF(Dataset):
       poses = poses[inds]
 
     # Scale the inverse intrinsics matrix by the image downsampling factor.
-    pixtocam = pixtocam @ np.diag([factor, factor, 1.])
+    pixtocam = pixtocam @ np.diag([factor, factor, 1.]) # K_inv
     self.pixtocams = pixtocam.astype(np.float32)
     self.focal = 1. / self.pixtocams[0, 0]
     self.distortion_params = distortion_params
@@ -627,7 +631,7 @@ class LLFF(Dataset):
       image_paths = [os.path.join(image_dir, colmap_to_image[f])
                      for f in image_names]
       images = [utils.load_img(x) for x in image_paths]
-      images = np.stack(images, axis=0) / 255.
+      images = np.stack(images, axis=0) / 255.  # [N_image, 3, H, W]
 
       # EXIF data is usually only present in the original JPEG images.
       jpeg_paths = [os.path.join(colmap_image_dir, f) for f in image_names]

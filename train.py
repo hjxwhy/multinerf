@@ -46,8 +46,9 @@ def main(unused_argv):
   # Shift the numpy random seed by host_id() to shuffle data loaded by different
   # hosts.
   np.random.seed(20201473 + jax.host_id())
-
-  config = configs.load_config()
+  print('hosd id---> ', jax.process_index())
+  print('device count---> ', jax.local_device_count())
+  config = configs.load_config()  # load config with gin, which is a google tools
 
   if config.batch_size % jax.device_count() != 0:
     raise ValueError('Batch size must be divisible by the number of devices.')
@@ -107,7 +108,7 @@ def main(unused_argv):
   else:
     num_steps = config.max_steps
   for step, batch in zip(range(init_step, num_steps + 1), pdataset):
-
+    # print(batch.rays.directions.shape)
     if reset_stats and (jax.host_id() == 0):
       stats_buffer = []
       train_start_time = time.time()
