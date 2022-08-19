@@ -17,7 +17,7 @@ export CUDA_VISIBLE_DEVICES=0
 
 SCENE=garden
 EXPERIMENT=360_v2
-DATA_DIR=/media/hjx/DataDisk/360_v2
+DATA_DIR=/home/hjx/Documents/nerf/360_v2
 CHECKPOINT_DIR=/home/hjx/Videos/mipnerf360/"$EXPERIMENT"/"$SCENE"
 
 # If running one of the indoor scenes, add

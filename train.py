@@ -46,8 +46,8 @@ def main(unused_argv):
   # Shift the numpy random seed by host_id() to shuffle data loaded by different
   # hosts.
   np.random.seed(20201473 + jax.host_id())
-  print('hosd id---> ', jax.process_index())
-  print('device count---> ', jax.local_device_count())
+  print('hosd id---> ', jax.process_index()) # multi process may have multi process id
+  print('device count---> ', jax.local_device_count()) # if you have multi gpu, it is your visiable gpu count
   config = configs.load_config()  # load config with gin, which is a google tools
 
   if config.batch_size % jax.device_count() != 0:

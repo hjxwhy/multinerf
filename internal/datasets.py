@@ -21,7 +21,9 @@ import os
 from os import path
 import queue
 import threading
-from typing import Mapping, Optional, Sequence, Text, Tuple, Union
+import random
+from itertools import cycle
+from typing import Mapping, Optional, Sequence, Text, Tuple, Union, List, Dict
 
 import cv2
 from internal import camera_utils
@@ -913,3 +915,216 @@ class DTU(Dataset):
     self.height, self.width = images.shape[1:3]
     self.camtoworlds = camtoworlds[indices]
     self.pixtocams = pixtocams[indices]
+
+class Waymo(threading.Thread, metaclass=abc.ABCMeta):
+  def __init__(self,
+               split: str,
+               data_dir: str,
+               config: configs.Config):
+    super().__init__()
+
+    # Initialize attributes
+    self._queue = queue.Queue(3)  # Set prefetch buffer to 3 batches.
+    self.daemon = True  # Sets parent Thread to be a daemon.
+    self._patch_size = np.maximum(config.patch_size, 1)
+    self._batch_size = config.batch_size // jax.process_count()
+    print('jax.process_count()---> ', jax.process_count())
+    if self._patch_size**2 > self._batch_size:
+      raise ValueError(f'Patch size {self._patch_size}^2 too large for ' +
+                       f'per-process batch size {self._batch_size}')
+    self._batching = utils.BatchingMethod(config.batching)
+    self._use_tiffs = config.use_tiffs
+    self._load_disps = config.compute_disp_metrics
+    self._load_normals = config.compute_normal_metrics
+    self._test_camera_idx = 0
+    self._num_border_pixels_to_mask = config.num_border_pixels_to_mask
+    self._apply_bayer_mask = config.apply_bayer_mask
+    self._cast_rays_in_train_step = config.cast_rays_in_train_step
+    self._render_spherical = False
+
+    self.split = utils.DataSplit(split)
+    self.data_dir = data_dir
+    self.near = config.near
+    self.far = config.far
+    self.render_path = config.render_path
+    self.distortion_params = None
+    self.disp_images = None
+    self.normal_images = None
+    self.alphas = None
+    self.poses = None
+    self.pixtocam_ndc = None
+    self.metadata = None
+    self.camtype = camera_utils.ProjectionType.PERSPECTIVE
+    self.exposures = None
+    self.render_exposures = None
+
+    # Providing type comments for these attributes, they must be correctly
+    # initialized by _load_renderings() (see docstring) in any subclass.
+    self.images: np.ndarray = None
+    self.camtoworlds: np.ndarray = None
+    self.pixtocams: np.ndarray = None
+    self.height: int = None
+    self.width: int = None
+
+    self.metadata: Dict = None
+    self.images_hash: List = None
+    self.img_nums: int = 10 # TODO remove hard code
+
+    # Load data from disk using provided config parameters.
+    self._read_meta()
+    self.chunk_index = cycle(range(0, len(self.images_hash), self.img_nums))
+    self._load_renderings(config)
+
+    if self.split == utils.DataSplit.TRAIN:
+      self.batch_chunk = iter(range(0, len(self.images)//self._batch_size*self._batch_size, self._batch_size))
+    
+    print('111111')
+
+  def _next_train(self):
+    return self._make_ray_batch()
+
+  def _read_meta(self):
+    metadata = {}
+    if self.split == utils.DataSplit.TRAIN:
+      load_type = ['train', 'val']
+    else:
+      load_type = ['val']
+
+    for t in load_type:
+      with open(os.path.join(self.data_dir, 'json', f'{t}.json')) as f:
+        type_meta = json.load(f)
+        with open(os.path.join(self.data_dir, 'json', f'split_block_{t}.json')) as fp:
+          block_meta = json.load(fp)['block_1']['elements'] if t == 'train' else json.load(fp)['block_1']
+          for element in block_meta:
+            metadata[element[0]] = {
+              'split': t,
+              'img_id': element[1],
+              'image_info': type_meta[element[0]]
+            }
+    self.metadata = metadata
+    self.images_hash = list(self.metadata.keys())
+    random.shuffle(self.images_hash)
+    
+
+  def _flatten(self, x):
+    # Always flatten out the height x width dimensions
+    x = [y.reshape([-1, y.shape[-1]]) for y in x]
+    # If global batching, also concatenate all data into one list
+    x = np.concatenate(x, axis=0)
+    return x
+  
+  def _load_renderings(self, config):
+    next_index = next(self.chunk_index)
+    chunk_image_hashs = self.images_hash[next_index:next_index+self.img_nums]
+
+    images = []
+    ray_origins = []
+    radiis = []
+    directions = []
+    viewdirs = []
+    imageplanes = []
+    image_ids = []
+    exposures = []
+    for img_hs in chunk_image_hashs:
+      img_meta = self.metadata[img_hs]
+      img_id = int(img_meta['img_id'])
+      image_info = img_meta['image_info']
+      image_name = image_info['image_name']
+      split = img_meta['split']
+      width, height = int(image_info['width']), int(image_info['height'])
+      equivalent_exposure = image_info['equivalent_exposure']
+      intrinsics = np.array([[image_info['intrinsics'][0], 0, width / 2], 
+                              [0, image_info['intrinsics'][1], height / 2], 
+                              [0, 0, 1]])
+      pixtocams = np.linalg.inv(intrinsics)
+      camtoworld = np.array(image_info['transform_matrix'])[:3, :]
+
+      image = Image.open(os.path.join(self.data_dir, f'images_{split}', image_name))
+
+      if config.factor > 0:
+        width, height = width // config.factor, height // height
+        intrinsics[:2, :] /= config.factor
+        image = image.resize((width, height))
+      image = np.array(image, dtype=np.float32) / 255
+
+
+      pix_x_int, pix_y_int = camera_utils.pixel_coordinates(width, height)
+      origin, direction, viewdir, radii, imageplane = camera_utils.pixels_to_rays(
+                                                                                    pix_x_int,
+                                                                                    pix_y_int,
+                                                                                    pixtocams,
+                                                                                    camtoworld,
+                                                                                  )
+      s = 0
+      if img_meta['split'] == 'val' and self.split == utils.DataSplit.TRAIN:
+        s = width // 2
+      ray_origins.append(origin[:, s:])
+      directions.append(direction[:, s:])
+      viewdirs.append(viewdir[:, s:])
+      radiis.append(radii[:, s:])
+      imageplanes.append(imageplane[:, s:])
+      image_ids.append((img_id * np.ones_like(origin[:, s:, :1])).astype(np.uint))
+      exposures.append(equivalent_exposure * np.ones_like(origin[:, s:, :1]))
+      images.append(image[:, s:])
+    if self.split == utils.DataSplit.TRAIN:
+      self.images = self._flatten(images)
+      perm = np.random.permutation(len(self.images))
+      self.images = self.images[perm, ...]
+      self.exposures = self._flatten(exposures)[perm, ...]
+      self.image_ids = self._flatten(image_ids)[perm, ...]
+      self.imageplanes = self._flatten(imageplanes)[perm, ...]
+      self.radiis = self._flatten(radiis)[perm, ...]
+      self.viewdirs = self._flatten(viewdirs)[perm, ...]
+      self.directions = self._flatten(directions)[perm, ...]
+      self.ray_origins = self._flatten(ray_origins)[perm, ...]
+    else:
+      self.images = images
+      self.exposures = exposures
+      self.image_ids = image_ids
+      self.imageplanes = imageplanes
+      self.radiis = radiis
+      self.viewdirs = viewdirs
+      self.ray_origins = ray_origins
+
+  def _make_ray_batch(self) -> utils.Batch:
+      batch_chunk = next(self.batch_chunk)
+      rgb = self.images[batch_chunk:batch_chunk+self._batch_size, ...]
+      broadcast_scalar = lambda x: np.broadcast_to(x, (self._batch_size,))[..., None]
+      ray_kwargs = {
+          'lossmult': broadcast_scalar(1.),
+          'near': broadcast_scalar(self.near),
+          'far': broadcast_scalar(self.far),
+          # 'cam_idx': broadcast_scalar(cam_idx),
+      }
+      rays = utils.Rays(
+      origins=self.ray_origins[batch_chunk:batch_chunk+self._batch_size, ...],
+      directions=self.directions[batch_chunk:batch_chunk+self._batch_size, ...],
+      viewdirs=self.viewdirs[batch_chunk:batch_chunk+self._batch_size, ...],
+      radii=self.radiis[batch_chunk:batch_chunk+self._batch_size, ...],
+      imageplane=self.imageplanes[batch_chunk:batch_chunk+self._batch_size, ...],
+      # lossmult=pixels.lossmult,
+      # near=pixels.near,
+      # far=pixels.far,
+      cam_idx=self.image_ids[batch_chunk:batch_chunk+self._batch_size, ...],
+      # exposure_idx=pixels.exposure_idx,
+      exposure_values=self.exposures[batch_chunk:batch_chunk+self._batch_size, ...],
+      **ray_kwargs
+  )
+      # Create data batch.
+      batch = {}
+      batch['rays'] = rays
+      if not self.render_path:
+        batch['rgb'] = rgb
+      return utils.Batch(**batch)
+  def __len__(self):
+    return len(self.images) // self._batch_size
+
+if __name__ == '__main__':
+  print('1111')
+  config = configs.Config()
+  waymo = Waymo('train', '/media/hjx/2D97AD940A9AD661/WaymoDataset', config)
+  print(waymo.split)
+  for i in range(len(waymo)):
+    batch  = waymo._make_ray_batch()
+    print(i)
+  
