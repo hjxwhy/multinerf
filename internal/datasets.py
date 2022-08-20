@@ -978,7 +978,37 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
     if self.split == utils.DataSplit.TRAIN:
       self.batch_chunk = iter(range(0, len(self.images)//self._batch_size*self._batch_size, self._batch_size))
     
-    print('111111')
+
+    self.cameras = (self.pixtocams,
+                    self.camtoworlds,
+                    self.distortion_params,
+                    self.pixtocam_ndc)
+
+    if self.split == utils.DataSplit.TRAIN:
+      self._next_fn = self._next_train
+    else:
+      self._next_fn = self._next_test
+    self._queue.put(self._next_fn())
+    self.start()
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    """Get the next training batch or test example.
+
+    Returns:
+      batch: dict, has 'rgb' and 'rays'.
+    """
+    x = self._queue.get()
+    if self.split == utils.DataSplit.TRAIN:
+      x = utils.shard(x)
+      # shape  = jax.tree_util.tree_map(lambda x: [(jax.local_device_count(), -1) + x.shape[1:], x.shape], x)
+      # print(shape)
+      return x
+    else:
+      # Do NOT move test `rays` to device, since it may be very large.
+      return x
 
   def _next_train(self):
     return self._make_ray_batch()
@@ -1025,6 +1055,8 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
     imageplanes = []
     image_ids = []
     exposures = []
+    _pixtocams = []
+    _camtoworld = []
     for img_hs in chunk_image_hashs:
       img_meta = self.metadata[img_hs]
       img_id = int(img_meta['img_id'])
@@ -1036,8 +1068,11 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
       intrinsics = np.array([[image_info['intrinsics'][0], 0, width / 2], 
                               [0, image_info['intrinsics'][1], height / 2], 
                               [0, 0, 1]])
+      
       pixtocams = np.linalg.inv(intrinsics)
+      _pixtocams.append(pixtocams)
       camtoworld = np.array(image_info['transform_matrix'])[:3, :]
+      _camtoworld.append(camtoworld)
 
       image = Image.open(os.path.join(self.data_dir, f'images_{split}', image_name))
 
@@ -1066,6 +1101,8 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
       image_ids.append((img_id * np.ones_like(origin[:, s:, :1])).astype(np.uint))
       exposures.append(equivalent_exposure * np.ones_like(origin[:, s:, :1]))
       images.append(image[:, s:])
+    self.pixtocams = np.stack(_pixtocams)
+    self.camtoworlds = np.stack(_camtoworld)
     if self.split == utils.DataSplit.TRAIN:
       self.images = self._flatten(images)
       perm = np.random.permutation(len(self.images))
@@ -1118,6 +1155,10 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
       return utils.Batch(**batch)
   def __len__(self):
     return len(self.images) // self._batch_size
+
+  @property
+  def size(self):
+    return len(self.images_hash)
 
 if __name__ == '__main__':
   print('1111')
