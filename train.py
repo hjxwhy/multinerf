@@ -17,6 +17,7 @@
 import functools
 import gc
 import time
+from tqdm import tqdm
 
 from absl import app
 import flax

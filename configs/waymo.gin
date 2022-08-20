@@ -1,6 +1,6 @@
 Config.dataset_loader = 'waymo'
-Config.near = 0.2
-Config.far = 1e6
+Config.near = 0.01
+Config.far = 10
 Config.factor = 4
 Config.batch_size = 1024
 

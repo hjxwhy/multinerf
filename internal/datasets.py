@@ -1020,7 +1020,7 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
     cam_idx = self._test_camera_idx
     self.current_chunk = cam_idx
     self._test_camera_idx = (self._test_camera_idx + 1) % self._n_examples
-    width, height = self.images[cam_idx].shape[:-1]
+    height, width = self.images[cam_idx].shape[:-1]
     pix_x_int, pix_y_int = camera_utils.pixel_coordinates(
           width, height)
     return self._make_ray_batch(pix_x_int, pix_y_int, self.image_ids[cam_idx][0, 0, 0], cam_idx)
@@ -1044,6 +1044,8 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
       load_type = ['train', 'val']
     else:
       load_type = ['val']
+    with open(os.path.join(self.data_dir, 'json', 'split_block_train.json')) as f:
+        self.centroid = np.array(json.load(f)['block_1']['centroid'][1])
 
     for t in load_type:
       with open(os.path.join(self.data_dir, 'json', f'{t}.json')) as f:
@@ -1099,6 +1101,7 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
       pixtocams = np.linalg.inv(intrinsics)
       _pixtocams.append(pixtocams)
       camtoworld = np.array(image_info['transform_matrix'])[:3, :]
+      camtoworld[:3, 3] -= self.centroid
       _camtoworld.append(camtoworld)
 
       image = Image.open(os.path.join(self.data_dir, f'images_{split}', image_name))
@@ -1256,10 +1259,20 @@ if __name__ == '__main__':
   config = configs.Config()
   waymo = Waymo('test', '/media/hjx/2D97AD940A9AD661/WaymoDataset', config)
   print(waymo.split)
+  metadata = waymo.metadata
+  # print(metadata)
+  positions = []
+  # for m in metadata.values():
+  #   positions.append(m['image_info']['origin_pos'])
+  # positions = np.array(positions)
+  positions = waymo.camtoworlds[:, :3, 3]
+  print(positions.shape)
+  print(positions.min(0), positions.max(0))
+  print(np.linalg.norm(positions.min(0)-positions.max(0)))
   # for i in range(len(waymo)):
   #   batch  = waymo._make_ray_batch()
   #   print(i)
   for batch in waymo:
-    # print(batch)
+    print(batch.rays.origins.shape, batch.rgb.shape)
     ...
   
