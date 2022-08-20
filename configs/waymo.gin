@@ -2,10 +2,15 @@ Config.dataset_loader = 'waymo'
 Config.near = 0.01
 Config.far = 10
 Config.factor = 4
-Config.batch_size = 1024
+Config.batch_size = 512
+Config.lr_delay_steps = 1024
+Config.render_chunk_size = 1024
 
 Model.raydist_fn = @jnp.reciprocal
+Model.num_glo_features = 32
 Model.opaque_background = True
+Model.num_prop_samples = 256
+Model.num_nerf_samples = 128
 
 PropMLP.warp_fn = @coord.contract
 PropMLP.net_depth = 4
