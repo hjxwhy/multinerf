@@ -50,6 +50,7 @@ def load_dataset(split, train_dir, config):
       'tat_nerfpp': TanksAndTemplesNerfPP,
       'tat_fvs': TanksAndTemplesFVS,
       'dtu': DTU,
+      'waymo': Waymo
   }
   return dataset_dict[config.dataset_loader](split, train_dir, config)
 
@@ -958,6 +959,7 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
     self.exposures = None
     self.render_exposures = None
 
+    self.factor = config.factor
     # Providing type comments for these attributes, they must be correctly
     # initialized by _load_renderings() (see docstring) in any subclass.
     self.images: np.ndarray = None
@@ -973,11 +975,7 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
     # Load data from disk using provided config parameters.
     self._read_meta()
     self.chunk_index = cycle(range(0, len(self.images_hash), self.img_nums))
-    self._load_renderings(config)
-
-    if self.split == utils.DataSplit.TRAIN:
-      self.batch_chunk = iter(range(0, len(self.images)//self._batch_size*self._batch_size, self._batch_size))
-    
+    self.refresh_chunks()
 
     self.cameras = (self.pixtocams,
                     self.camtoworlds,
@@ -1009,10 +1007,37 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
     else:
       # Do NOT move test `rays` to device, since it may be very large.
       return x
+  def run(self):
+    while True:
+      if self.current_chunk == self.last_chunk:
+        self.refresh_chunks()
+      self._queue.put(self._next_fn())
 
   def _next_train(self):
-    return self._make_ray_batch()
+    return self._make_train_ray_batch()
+  def _next_test(self):
+    # Use the next camera index.
+    cam_idx = self._test_camera_idx
+    self.current_chunk = cam_idx
+    self._test_camera_idx = (self._test_camera_idx + 1) % self._n_examples
+    width, height = self.images[cam_idx].shape[:-1]
+    pix_x_int, pix_y_int = camera_utils.pixel_coordinates(
+          width, height)
+    return self._make_ray_batch(pix_x_int, pix_y_int, self.image_ids[cam_idx][0, 0, 0], cam_idx)
 
+  def refresh_chunks(self):
+    self.images, self.ray_origins, self.directions, self.viewdirs, \
+    self.radiis, self.imageplanes, self.image_ids, self.exposures, \
+    self.pixtocams, self.camtoworlds = self._load_renderings()
+    if self.split == utils.DataSplit.TRAIN:
+      self.batch_chunk = range(0, len(self.images)//self._batch_size*self._batch_size, self._batch_size)
+      self.last_chunk = self.batch_chunk[-1]
+      self.batch_chunk = iter(self.batch_chunk)
+    else:
+      self.last_chunk = len(self.images)-1
+    self._n_examples = len(self.images)
+    # self._load_queue.put(self._load_renderings())
+    
   def _read_meta(self):
     metadata = {}
     if self.split == utils.DataSplit.TRAIN:
@@ -1043,8 +1068,10 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
     x = np.concatenate(x, axis=0)
     return x
   
-  def _load_renderings(self, config):
+  def _load_renderings(self):
     next_index = next(self.chunk_index)
+    if next_index == 0:
+      random.shuffle(self.images_hash)
     chunk_image_hashs = self.images_hash[next_index:next_index+self.img_nums]
 
     images = []
@@ -1076,12 +1103,11 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
 
       image = Image.open(os.path.join(self.data_dir, f'images_{split}', image_name))
 
-      if config.factor > 0:
-        width, height = width // config.factor, height // height
-        intrinsics[:2, :] /= config.factor
+      if self.factor > 0:
+        width, height = width // self.factor, height // self.factor
+        intrinsics[:2, :] /= self.factor
         image = image.resize((width, height))
       image = np.array(image, dtype=np.float32) / 255
-
 
       pix_x_int, pix_y_int = camera_utils.pixel_coordinates(width, height)
       origin, direction, viewdir, radii, imageplane = camera_utils.pixels_to_rays(
@@ -1101,30 +1127,24 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
       image_ids.append((img_id * np.ones_like(origin[:, s:, :1])).astype(np.uint))
       exposures.append(equivalent_exposure * np.ones_like(origin[:, s:, :1]))
       images.append(image[:, s:])
-    self.pixtocams = np.stack(_pixtocams)
-    self.camtoworlds = np.stack(_camtoworld)
+    _pixtocams = np.stack(_pixtocams)
+    _camtoworlds = np.stack(_camtoworld)
     if self.split == utils.DataSplit.TRAIN:
-      self.images = self._flatten(images)
-      perm = np.random.permutation(len(self.images))
-      self.images = self.images[perm, ...]
-      self.exposures = self._flatten(exposures)[perm, ...]
-      self.image_ids = self._flatten(image_ids)[perm, ...]
-      self.imageplanes = self._flatten(imageplanes)[perm, ...]
-      self.radiis = self._flatten(radiis)[perm, ...]
-      self.viewdirs = self._flatten(viewdirs)[perm, ...]
-      self.directions = self._flatten(directions)[perm, ...]
-      self.ray_origins = self._flatten(ray_origins)[perm, ...]
-    else:
-      self.images = images
-      self.exposures = exposures
-      self.image_ids = image_ids
-      self.imageplanes = imageplanes
-      self.radiis = radiis
-      self.viewdirs = viewdirs
-      self.ray_origins = ray_origins
+      images = self._flatten(images)
+      perm = np.random.permutation(len(images))
+      images = images[perm, ...]
+      exposures = self._flatten(exposures)[perm, ...]
+      image_ids = self._flatten(image_ids)[perm, ...]
+      imageplanes = self._flatten(imageplanes)[perm, ...]
+      radiis = self._flatten(radiis)[perm, ...]
+      viewdirs = self._flatten(viewdirs)[perm, ...]
+      directions = self._flatten(directions)[perm, ...]
+      ray_origins = self._flatten(ray_origins)[perm, ...]
+    return images, ray_origins, directions, viewdirs, radiis, imageplanes, image_ids, exposures, _pixtocams, _camtoworlds
 
-  def _make_ray_batch(self) -> utils.Batch:
+  def _make_train_ray_batch(self) -> utils.Batch:
       batch_chunk = next(self.batch_chunk)
+      self.current_chunk = batch_chunk
       rgb = self.images[batch_chunk:batch_chunk+self._batch_size, ...]
       broadcast_scalar = lambda x: np.broadcast_to(x, (self._batch_size,))[..., None]
       ray_kwargs = {
@@ -1134,25 +1154,96 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
           # 'cam_idx': broadcast_scalar(cam_idx),
       }
       rays = utils.Rays(
-      origins=self.ray_origins[batch_chunk:batch_chunk+self._batch_size, ...],
-      directions=self.directions[batch_chunk:batch_chunk+self._batch_size, ...],
-      viewdirs=self.viewdirs[batch_chunk:batch_chunk+self._batch_size, ...],
-      radii=self.radiis[batch_chunk:batch_chunk+self._batch_size, ...],
-      imageplane=self.imageplanes[batch_chunk:batch_chunk+self._batch_size, ...],
-      # lossmult=pixels.lossmult,
-      # near=pixels.near,
-      # far=pixels.far,
-      cam_idx=self.image_ids[batch_chunk:batch_chunk+self._batch_size, ...],
-      # exposure_idx=pixels.exposure_idx,
-      exposure_values=self.exposures[batch_chunk:batch_chunk+self._batch_size, ...],
-      **ray_kwargs
-  )
+        origins=self.ray_origins[batch_chunk:batch_chunk+self._batch_size, ...],
+        directions=self.directions[batch_chunk:batch_chunk+self._batch_size, ...],
+        viewdirs=self.viewdirs[batch_chunk:batch_chunk+self._batch_size, ...],
+        radii=self.radiis[batch_chunk:batch_chunk+self._batch_size, ...],
+        imageplane=self.imageplanes[batch_chunk:batch_chunk+self._batch_size, ...],
+        # lossmult=pixels.lossmult,
+        # near=pixels.near,
+        # far=pixels.far,
+        cam_idx=self.image_ids[batch_chunk:batch_chunk+self._batch_size, ...],
+        # exposure_idx=pixels.exposure_idx,
+        exposure_values=self.exposures[batch_chunk:batch_chunk+self._batch_size, ...],
+        **ray_kwargs
+      )
       # Create data batch.
       batch = {}
       batch['rays'] = rays
       if not self.render_path:
         batch['rgb'] = rgb
       return utils.Batch(**batch)
+
+  def _make_ray_batch(self,
+                      pix_x_int: np.ndarray,
+                      pix_y_int: np.ndarray,
+                      img_id: np.int32,
+                      cam_idx: Union[np.ndarray, np.int32],
+                      lossmult: Optional[np.ndarray] = None
+                      ) -> utils.Batch:
+    """Creates ray data batch from pixel coordinates and camera indices.
+
+    All arguments must have broadcastable shapes. If the arguments together
+    broadcast to a shape [a, b, c, ..., z] then the returned utils.Rays object
+    will have array attributes with shape [a, b, c, ..., z, N], where N=3 for
+    3D vectors and N=1 for per-ray scalar attributes.
+
+    Args:
+      pix_x_int: int array, x coordinates of image pixels.
+      pix_y_int: int array, y coordinates of image pixels.
+      cam_idx: int or int array, camera indices.
+      lossmult: float array, weight to apply to each ray when computing loss fn.
+
+    Returns:
+      A dict mapping from strings utils.Rays or arrays of image data.
+      This is the batch provided for one NeRF train or test iteration.
+    """
+    broadcast_scalar = lambda x: np.broadcast_to(x, self.images[cam_idx].shape[:-1])[..., None]
+    ray_kwargs = {
+        'lossmult': broadcast_scalar(1.) if lossmult is None else lossmult,
+        'near': broadcast_scalar(self.near),
+        'far': broadcast_scalar(self.far),
+        'cam_idx': broadcast_scalar(img_id),
+    }
+    # Collect per-camera information needed for each ray.
+    # if self.metadata is not None:
+    #   # Exposure index and relative shutter speed, needed for RawNeRF.
+    #   for key in ['exposure_idx', 'exposure_values']:
+    #     idx = 0 if self.render_path else cam_idx
+    #     ray_kwargs[key] = broadcast_scalar(self.metadata[key][idx])
+    if self.exposures is not None:
+      idx = 0 if self.render_path else cam_idx
+      ray_kwargs['exposure_values'] = broadcast_scalar(self.exposures[idx][..., 0])
+    if self.render_path and self.render_exposures is not None:
+      ray_kwargs['exposure_values'] = broadcast_scalar(
+          self.render_exposures[cam_idx])
+
+    pixels = utils.Pixels(pix_x_int, pix_y_int, **ray_kwargs)
+    if self._cast_rays_in_train_step and self.split == utils.DataSplit.TRAIN:
+      # Fast path, defer ray computation to the training loop (on device).
+      rays = pixels
+    else:
+      # Slow path, do ray computation using numpy (on CPU).
+      camera = (self.pixtocams[cam_idx],
+                self.camtoworlds[cam_idx],
+                self.distortion_params,
+                self.pixtocam_ndc)
+      rays = camera_utils.cast_ray_batch(
+          camera, pixels, self.camtype, xnp=np)
+
+    # Create data batch.
+    batch = {}
+    batch['rays'] = rays
+    if not self.render_path:
+      batch['rgb'] = self.images[cam_idx]
+    # if self._load_disps:
+    #   batch['disps'] = self.disp_images[cam_idx, pix_y_int, pix_x_int]
+    # if self._load_normals:
+    #   batch['normals'] = self.normal_images[cam_idx, pix_y_int, pix_x_int]
+    #   batch['alphas'] = self.alphas[cam_idx, pix_y_int, pix_x_int]
+    return utils.Batch(**batch)
+
+
   def __len__(self):
     return len(self.images) // self._batch_size
 
@@ -1163,9 +1254,12 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
 if __name__ == '__main__':
   print('1111')
   config = configs.Config()
-  waymo = Waymo('train', '/media/hjx/2D97AD940A9AD661/WaymoDataset', config)
+  waymo = Waymo('test', '/media/hjx/2D97AD940A9AD661/WaymoDataset', config)
   print(waymo.split)
-  for i in range(len(waymo)):
-    batch  = waymo._make_ray_batch()
-    print(i)
+  # for i in range(len(waymo)):
+  #   batch  = waymo._make_ray_batch()
+  #   print(i)
+  for batch in waymo:
+    # print(batch)
+    ...
   
