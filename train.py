@@ -89,6 +89,7 @@ def main(unused_argv):
   state = flax.jax_utils.replicate(state)
 
   if jax.host_id() == 0:
+    pbar = tqdm(total=config.max_steps)
     summary_writer = tensorboard.SummaryWriter(config.checkpoint_dir)
     if config.rawnerf_mode:
       for name, data in zip(['train', 'test'], [dataset, test_dataset]):
@@ -134,7 +135,7 @@ def main(unused_argv):
     # only use host 0 to record results.
     if jax.host_id() == 0:
       stats = flax.jax_utils.unreplicate(stats)
-
+      pbar.update()
       stats_buffer.append(stats)
 
       if step == init_step or step % config.print_every == 0:

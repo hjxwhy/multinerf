@@ -1036,6 +1036,10 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
     else:
       self.last_chunk = len(self.images)-1
     self._n_examples = len(self.images)
+    self.cameras = (self.pixtocams,
+                    self.camtoworlds,
+                    self.distortion_params,
+                    self.pixtocam_ndc)
     # self._load_queue.put(self._load_renderings())
     
   def _read_meta(self):
