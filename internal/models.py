@@ -455,8 +455,8 @@ class MLP(nn.Module):
       """Helper function to output density."""
       # Encode input positions
 
-      if self.warp_fn is not None:
-        means, covs = coord.track_linearize(self.warp_fn, means, covs)
+      # if self.warp_fn is not None:
+      #   means, covs = coord.track_linearize(self.warp_fn, means, covs)
 
       lifted_means, lifted_vars = (
           coord.lift_and_diagonalize(means, covs, self.pos_basis_t))

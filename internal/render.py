@@ -15,6 +15,7 @@
 """Helper functions for shooting and rendering rays."""
 
 from internal import stepfun
+from internal import coord
 import jax.numpy as jnp
 
 
@@ -123,6 +124,7 @@ def cast_rays(tdist, origins, directions, radii, ray_shape, diag=True):
   else:
     raise ValueError('ray_shape must be \'cone\' or \'cylinder\'')
   means, covs = gaussian_fn(directions, t0, t1, radii, diag)
+  means, covs = coord.track_linearize(coord.contract, means, covs)
   means = means + origins[..., None, :]
   return means, covs
 

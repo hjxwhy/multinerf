@@ -13,12 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-export CUDA_VISIBLE_DEVICES=0
-
+export CUDA_VISIBLE_DEVICES=1
+export XLA_PYTHON_CLIENT_MEM_FRACTION=.7
 SCENE=garden
 EXPERIMENT=waymo
-DATA_DIR=/media/hjx/2D97AD940A9AD661/WaymoDataset
-CHECKPOINT_DIR=/home/hjx/Videos/mipnerf360/"$EXPERIMENT"
+DATA_DIR=/media/hjx/DataDisk/waymo/WaymoDataset
+CHECKPOINT_DIR=/home/hjx/Videos/block_exp/"$EXPERIMENT"
 
 # If running one of the indoor scenes, add
 # --gin_bindings="Config.factor = 2"

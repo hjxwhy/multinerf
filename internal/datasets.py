@@ -1078,8 +1078,8 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
     next_index = next(self.chunk_index)
     if next_index == 0:
       random.shuffle(self.images_hash)
-    chunk_image_hashs = self.images_hash[next_index:next_index+self.img_nums]
-
+    # chunk_image_hashs = self.images_hash[next_index:next_index+self.img_nums]
+    chunk_image_hashs = self.images_hash
     images = []
     ray_origins = []
     radiis = []
@@ -1098,15 +1098,10 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
       split = img_meta['split']
       width, height = int(image_info['width']), int(image_info['height'])
       equivalent_exposure = image_info['equivalent_exposure']
-      intrinsics = np.array([[image_info['intrinsics'][0], 0, width / 2], 
-                              [0, image_info['intrinsics'][1], height / 2], 
+      intrinsics = np.array([[image_info['intrinsics'][0], 0, width / 2],
+                              [0, image_info['intrinsics'][1], height / 2],
                               [0, 0, 1]])
-      
-      pixtocams = np.linalg.inv(intrinsics)
-      _pixtocams.append(pixtocams)
-      camtoworld = np.array(image_info['transform_matrix'])[:3, :]
-      camtoworld[:3, 3] -= self.centroid
-      _camtoworld.append(camtoworld)
+
 
       image = Image.open(os.path.join(self.data_dir, f'images_{split}', image_name))
 
@@ -1115,6 +1110,11 @@ class Waymo(threading.Thread, metaclass=abc.ABCMeta):
         intrinsics[:2, :] /= self.factor
         image = image.resize((width, height))
       image = np.array(image, dtype=np.float32) / 255
+      pixtocams = np.linalg.inv(intrinsics)
+      _pixtocams.append(pixtocams)
+      camtoworld = np.array(image_info['transform_matrix'])[:3, :]
+      camtoworld[:3, 3] -= self.centroid
+      _camtoworld.append(camtoworld)
 
       pix_x_int, pix_y_int = camera_utils.pixel_coordinates(width, height)
       origin, direction, viewdir, radii, imageplane = camera_utils.pixels_to_rays(

@@ -82,7 +82,7 @@ class Config:
   early_exit_steps: Optional[int] = None  # Early stopping, for debugging.
   checkpoint_every: int = 25000  # The number of steps to save a checkpoint.
   print_every: int = 100  # The number of steps between reports to tensorboard.
-  train_render_every: int = 5000  # Steps between test set renders when training
+  train_render_every: int = 10000  # Steps between test set renders when training
   cast_rays_in_train_step: bool = False  # If True, compute rays in train step.
   data_loss_type: str = 'charb'  # What kind of loss to use ('mse' or 'charb').
   charb_padding: float = 0.001  # The padding used for Charbonnier loss.
