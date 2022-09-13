@@ -190,6 +190,9 @@ def predicted_normal_loss(model, ray_history, config):
       total_loss += config.predicted_normal_loss_mult * loss
   return total_loss
 
+def visibility_loss(visib_trans, trans):
+  trans_nograd = jax.lax.stop_gradient(trans)
+  return jnp.mean(0.01 * (visib_trans[..., 0] - trans_nograd)**2)
 
 def clip_gradients(grad, config):
   """Clips gradients of each MLP individually based on norm and max value."""
@@ -277,6 +280,9 @@ def create_train_step(model: models.Model,
 
       data_loss, stats = compute_data_loss(batch, renderings, rays, config)
       losses['data'] = data_loss
+
+      #TODO(Jianxin) check visibility works or not
+      losses['visib'] = visibility_loss(renderings[-1]['visib_trans'], renderings[-1]['trans'])
 
       if config.interlevel_loss_mult > 0:
         losses['interlevel'] = interlevel_loss(ray_history, config)

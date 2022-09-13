@@ -97,6 +97,7 @@ class Model(nn.Module):
     # being regularized.
     nerf_mlp = NerfMLP()
     prop_mlp = nerf_mlp if self.single_mlp else PropMLP()
+    visibility = Visibility()
 
     if self.num_glo_features > 0:
       if not zero_glo:
@@ -241,14 +242,17 @@ class Model(nn.Module):
           glo_vec=None if is_prop else glo_vec,
           exposure=rays.exposure_values,
       )
+      #TODO(Jianxin) check visibility works or not
+      if not is_prop:
+          visib = visibility(gaussians, rays.viewdirs)
 
       # Get the weights used by volumetric rendering (and our other losses).
-      weights = render.compute_alpha_weights(
+      weights, alpha, trans = render.compute_alpha_weights(
           ray_results['density'],
           tdist,
           rays.directions,
           opaque_background=self.opaque_background,
-      )[0]
+      )
 
       # Define or sample the background color for each ray.
       if self.bg_intensity_range[0] == self.bg_intensity_range[1]:
@@ -303,7 +307,10 @@ class Model(nn.Module):
             weights.reshape([-1, weights.shape[-1]])[:n, :])
         rgb = ray_results['rgb']
         rendering['ray_rgbs'] = (rgb.reshape((-1,) + rgb.shape[-2:]))[:n, :, :]
-
+      #TODO(Jianxin) check visibility works or not
+      if not is_prop:
+          rendering['trans'] = trans
+          rendering['visib_trans'] = visib
       renderings.append(rendering)
       ray_results['sdist'] = jnp.copy(sdist)
       ray_results['weights'] = jnp.copy(weights)
@@ -624,6 +631,38 @@ class MLP(nn.Module):
         roughness=roughness,
     )
 
+class Visibility(nn.Module):
+    net_depth:int = 4
+    net_width:int = 128
+    min_deg_point: int = 0  # Min degree of positional encoding for 3D points.
+    max_deg_point: int = 12  # Max degree of positional encoding for 3D points.
+    basis_shape: str = 'icosahedron'  # `octahedron` or `icosahedron`.
+    basis_subdivisions: int = 2  # Tesselation count. 'octahedron' + 1 == eye(3).
+    weight_init: str = 'he_uniform'
+    def setup(self) -> None:
+        self.pos_basis_t = jnp.array(
+            geopoly.generate_basis(self.basis_shape, self.basis_subdivisions)).T
+
+    @nn.compact
+    def __call__(self, gaussians, viewdirs):
+        means, covs = gaussians
+        lifted_means, lifted_vars = (
+            coord.lift_and_diagonalize(means, covs, self.pos_basis_t))
+        x = coord.integrated_pos_enc(lifted_means, lifted_vars,
+                                     self.min_deg_point, self.max_deg_point)
+        dense_layer = functools.partial(
+            nn.Dense, kernel_init=getattr(jax.nn.initializers, self.weight_init)())
+        dir_enc = coord.pos_enc(
+            viewdirs, min_deg=0, max_deg=4, append_identity=True)
+        dir_enc = jnp.broadcast_to(
+            dir_enc[..., None, :],
+            x.shape[:-1] + (dir_enc.shape[-1],))
+        x = jnp.concatenate([x, dir_enc], axis=-1)
+        for i in range(self.net_depth):
+            x = dense_layer(self.net_width)(x)
+            x = nn.relu(x)
+        x = dense_layer(1)(x)
+        return nn.softplus(x)
 
 @gin.configurable
 class NerfMLP(MLP):

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 export XLA_PYTHON_CLIENT_MEM_FRACTION=.7
 SCENE=garden
 EXPERIMENT=waymo
